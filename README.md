@@ -1,13 +1,17 @@
 # GitOps en Kubernetes: de `git push` a producción con autoescalado y observabilidad
 
-Este proyecto es una plataforma completa sobre **Kubernetes (k3s)**. Cada `git push` hace lo siguiente sin que nadie toque el clúster:
+Plataforma completa sobre **Kubernetes (k3s)** en la que un `git push` basta para llevar el código a producción. Por el camino:
 
-1. Pasa los **tests**.
-2. Construye una **imagen Docker** y la sube a GitHub Container Registry.
-3. **Escanea vulnerabilidades** con Trivy.
-4. **Argo CD** la despliega en el clúster.
+- se pasan los **tests**;
+- se construye una **imagen Docker**;
+- se **escanea** en busca de vulnerabilidades;
+- **Argo CD** despliega la nueva versión **sin cortes de servicio**.
 
-Una vez desplegada, la aplicación **escala sola** con la carga (HPA) y se **monitoriza** con Prometheus y Grafana.
+Una vez desplegada, la aplicación **escala sola** según la carga (HPA) y se **monitoriza** con Prometheus y Grafana.
+
+![Árbol de recursos en Argo CD con 8 réplicas tras el autoescalado](docs/argocd-tree.png)
+
+## Arquitectura
 
 ```mermaid
 flowchart LR
@@ -26,14 +30,40 @@ flowchart LR
 
 ## Qué demuestra
 
-| Área | Cómo |
+| Área | Implementación |
 |---|---|
-| CI/CD | GitHub Actions: tests con pytest, build multietapa, push a GHCR y etiquetas por SHA del commit |
-| GitOps | Argo CD con `selfHeal` y `prune`: Git es la única fuente de verdad, y un cambio manual con kubectl se revierte solo |
-| Kubernetes | Deployment, Service, Ingress, HPA, PodDisruptionBudget, probes, requests y limits, Kustomize |
-| Seguridad | Contenedor sin root, sistema de archivos de solo lectura, sin capabilities, seccomp y escaneo con Trivy |
-| Observabilidad | Métricas Prometheus en la app, ServiceMonitor y dashboard de Grafana versionado como código |
-| Fiabilidad | Rolling update sin cortes (`maxUnavailable: 0`), rollback con Git y autoescalado bajo carga |
+| **CI/CD** | GitHub Actions: tests con pytest, build multietapa, push a GHCR y etiquetado por SHA del commit (nunca `latest`) |
+| **GitOps** | Argo CD con `automated`, `selfHeal` y `prune`: Git es la única fuente de verdad |
+| **Kubernetes** | Deployment, Service, Ingress, HPA, PodDisruptionBudget, probes, requests y limits, Kustomize |
+| **Seguridad** | Contenedor sin root, sistema de archivos de solo lectura, sin capabilities, seccomp `RuntimeDefault` y escaneo con Trivy |
+| **Observabilidad** | Métricas Prometheus en la app, ServiceMonitor y dashboard de Grafana versionado como código |
+| **Fiabilidad** | Rolling update sin cortes (`maxUnavailable: 0` y readinessProbe), autorreparación y autoescalado de 2 a 8 réplicas |
+
+## Resultados
+
+### 1. De `git push` a producción sin tocar el clúster
+Un cambio en `app/main.py` pasa el pipeline en menos de un minuto. El bot hace commit de la nueva etiqueta en `k8s/kustomization.yaml` y Argo CD despliega la versión con un rolling update.
+
+![Pipeline de GitHub Actions en verde](docs/github-actions.png)
+![Respuesta de la app con la nueva versión](docs/app.png)
+
+### 2. Autoescalado bajo carga
+Un Job genera 3 minutos de carga contra `/work`, un endpoint que consume CPU. Con la CPU al 500 % del objetivo, el HPA escala de **2 a 8 réplicas** en menos de un minuto, y vuelve a 2 cuando termina la carga.
+
+![Dashboard de Grafana durante la prueba de carga](docs/grafana-hpa.png)
+
+### 3. Autorreparación
+Borrar a mano un recurso del clúster (`kubectl delete hpa gitops-demo`) no sirve de nada: Argo CD detecta la desviación respecto a Git y lo recrea en segundos.
+
+## Problemas encontrados y cómo los resolví
+
+**El autoescalado no funcionaba con GitOps.** Con la CPU al 486 %, el HPA seguía en 2 réplicas. El Deployment declaraba `replicas: 2`, así que cada vez que el HPA escalaba, Argo CD (con `selfHeal`) lo detectaba como desviación respecto a Git y lo revertía. El panel de réplicas de Grafana muestra la pelea: las réplicas deseadas en 8 y las reales oscilando. **Solución:** quitar `replicas` del Deployment y dejar que el HPA (`minReplicas: 2`) sea el único dueño de ese campo.
+
+**Más réplicas no siempre significa más capacidad.** Con 8 réplicas, el throughput se mantuvo en unas 80 peticiones por segundo, porque todos los pods comparten un único nodo de 4 vCPU que ya estaba saturado. En un clúster real, el siguiente paso sería un *Cluster Autoscaler* que añada nodos.
+
+**La instalación de Argo CD fallaba con `kubectl apply`.** El CRD de `ApplicationSet` supera el límite de 256 KB de la anotación `last-applied-configuration`. **Solución:** instalar con `kubectl apply --server-side`.
+
+**Versión inexistente de una GitHub Action.** El pipeline fallaba en *Set up job* porque las etiquetas de `trivy-action` usan el prefijo `v`. Lo detecté en los logs y lo corregí fijando `@v0.36.0`.
 
 ## Estructura
 
@@ -44,90 +74,47 @@ argocd/              Definición de la Application de Argo CD
 platform/            Scripts de instalación del clúster, Argo CD y monitorización
 loadtest/            Job de carga para disparar el autoescalado
 .github/workflows/   Pipeline de CI/CD
+docs/                Capturas
 ```
 
-## Puesta en marcha (≈ 4 horas la primera vez)
+## Cómo reproducirlo
 
-| Bloque | Tiempo |
-|---|---|
-| 1. Máquina virtual | 30 min |
-| 2. Repositorio y pipeline | 45 min |
-| 3. k3s y monitorización | 40 min |
-| 4. Argo CD y primer despliegue | 40 min |
-| 5. Demostraciones y capturas | 60 min |
-| 6. Pulir el README y LinkedIn | 30 min |
+Requisitos: una VM Ubuntu Server (4 vCPU, 8 GB de RAM, red en modo puente) y una cuenta de GitHub.
 
-### 1. Máquina virtual
-
-1. En VirtualBox crea una VM **Ubuntu Server 24.04** con **4 CPU, 8 GB de RAM y 30 GB de disco**.
-2. En Red pon **Adaptador puente** y marca *Install OpenSSH server* durante la instalación.
-3. Dentro de la VM, apunta su IP con `ip -4 addr` (por ejemplo, 192.168.1.50). Es la `IP_VM`.
-
-### 2. Repositorio y pipeline (desde Windows, con Git Bash)
-
-1. Crea en GitHub un repositorio **público y vacío** llamado `gitops-k8s-platform`.
-2. En la carpeta del proyecto, abre **Git Bash** y ejecuta:
+1. **Haz un fork del repositorio** y configúralo. Pon el paquete de GHCR en *Public* tras la primera ejecución del pipeline.
    ```bash
-   bash platform/00-configure.sh <tu-usuario-github> <IP_VM>
-   git init -b main && git add -A && git commit -m "Proyecto GitOps en Kubernetes"
-   git remote add origin https://github.com/<tu-usuario-github>/gitops-k8s-platform.git
-   git push -u origin main
+   bash platform/00-configure.sh <usuario-github> <ip-vm>
+   git commit -am "config" && git push
    ```
-3. En la pestaña **Actions** verás pasar los tests, el build, Trivy y el commit automático `deploy: gitops-demo <sha>`. Después, ejecuta `git pull` en Windows para traer ese commit.
-4. En GitHub, ve a **Packages → gitops-k8s-platform → Package settings** y cambia la visibilidad a **Public**, para que el clúster pueda descargar la imagen sin credenciales.
-
-A partir de aquí, los cambios de código los haces en Windows (VS Code) y los subes con `git push`. La VM solo lee el repositorio.
-
-### 3. k3s y monitorización (en la VM)
-
-Desde PowerShell, entra en la VM con `ssh usuario@IP_VM` y ejecuta:
-
-```bash
-sudo apt update && sudo apt install -y git
-git clone https://github.com/<tu-usuario-github>/gitops-k8s-platform.git && cd gitops-k8s-platform
-bash platform/01-install-k3s.sh && source ~/.bashrc
-bash platform/03-install-monitoring.sh     # antes de Argo CD: instala el tipo ServiceMonitor
-kubectl -n monitoring port-forward svc/monitoring-grafana 3000:80 --address 0.0.0.0 &
-```
-
-Grafana estará en `http://IP_VM:3000`.
-
-### 4. Argo CD y primer despliegue
-
-```bash
-bash platform/02-install-argocd.sh
-kubectl apply -f argocd/application.yaml
-kubectl -n argocd port-forward svc/argocd-server 8080:443 --address 0.0.0.0 &
-kubectl -n demo get pods,hpa,ingress
-```
-
-Comprueba que todo responde:
-
-- Argo CD en `https://IP_VM:8080`.
-- La app en `http://demo.IP_VM.nip.io`.
-- El dashboard *gitops-demo* en Grafana.
-
-### 5. Demostraciones (haz capturas o un GIF de cada una para el README)
-
-1. **GitOps de extremo a extremo.** Cambia el mensaje de `root()` en `app/main.py` y haz push. Sin tocar el clúster, en unos minutos `http://demo.IP_VM.nip.io` muestra la nueva `version`. Argo CD enseña el historial de despliegues.
-2. **Autoescalado.**
+2. **En la VM**, instala el clúster y la monitorización:
    ```bash
-   kubectl apply -f loadtest/load-job.yaml
-   kubectl -n demo get hpa -w
+   git clone https://github.com/<usuario-github>/gitops-k8s-platform.git && cd gitops-k8s-platform
+   bash platform/01-install-k3s.sh && source ~/.bashrc
+   bash platform/03-install-monitoring.sh
    ```
-   Verás cómo pasa de 2 a varias réplicas, y en Grafana suben a la vez las peticiones, la CPU y las réplicas. Cuando acaba la carga, vuelve a 2.
-3. **Autorreparación (selfHeal).** Ejecuta `kubectl -n demo scale deploy gitops-demo --replicas=1`. Argo CD detecta la desviación respecto a Git y la deshace.
-4. **Rollback con Git.** Haz `git revert` del último commit `deploy:` y push. Argo CD vuelve a la versión anterior.
-5. **Actualización sin cortes.** Durante un despliegue, deja esto en otra terminal: `while true; do curl -s -o /dev/null -w "%{http_code}\n" http://demo.IP_VM.nip.io; sleep 0.2; done`. No debe aparecer ningún error.
+3. **Instala Argo CD** y registra la aplicación:
+   ```bash
+   bash platform/02-install-argocd.sh
+   kubectl apply -f argocd/application.yaml
+   ```
+4. **Accede a los servicios:**
+   - App: `http://demo.<ip-vm>.nip.io`
+   - Grafana: `kubectl -n monitoring port-forward svc/monitoring-grafana 3000:80 --address 0.0.0.0`
+   - Argo CD: `kubectl -n argocd port-forward svc/argocd-server 8080:443 --address 0.0.0.0`
+5. **Lanza la prueba de carga:**
+   ```bash
+   kubectl apply -f loadtest/load-job.yaml && kubectl -n demo get hpa -w
+   ```
 
 ## Próximas mejoras
 
-- Helm chart propio en lugar de Kustomize.
 - TLS con cert-manager.
 - Alertas en Alertmanager.
-- Entornos `staging` y `prod` con overlays.
-- Desplegar el mismo repositorio en un clúster gestionado (EKS, AKS o GKE) con Terraform.
+- Entornos `staging` y `prod` con overlays de Kustomize.
+- Helm chart propio.
+- Despliegue en un clúster gestionado (EKS, AKS o GKE) con Terraform.
 
 ## Autor
 
-**David Mesa Moyano**, Ingeniero Superior de Telecomunicación (UPV) · david_mes@outlook.com
+**David Mesa Moyano**, Ingeniero Superior de Telecomunicación (UPV)
+david_mes@outlook.com · [LinkedIn](https://www.linkedin.com/in/)
