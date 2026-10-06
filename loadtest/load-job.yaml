@@ -1,0 +1,17 @@
+# Genera carga durante 3 minutos contra /work para disparar el autoescalado.
+# Uso: kubectl -n demo delete job load --ignore-not-found && kubectl apply -f loadtest/load-job.yaml
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: load
+  namespace: demo
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 600
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: hey
+          image: williamyeh/hey:latest
+          args: ["-z", "3m", "-c", "20", "http://gitops-demo.demo.svc.cluster.local/work?ms=50"]

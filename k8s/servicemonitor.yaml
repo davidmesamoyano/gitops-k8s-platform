@@ -1,0 +1,12 @@
+# Le dice a Prometheus que recoja /metrics de la app cada 15 s
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: gitops-demo
+spec:
+  selector:
+    matchLabels: { app: gitops-demo }
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: 15s

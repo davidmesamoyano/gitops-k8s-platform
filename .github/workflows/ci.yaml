@@ -1,0 +1,63 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    paths: ["app/**", ".github/workflows/**"]
+  pull_request:
+    paths: ["app/**"]
+
+permissions:
+  contents: write    # para hacer commit de la nueva etiqueta
+  packages: write    # para subir la imagen a GHCR
+
+env:
+  IMAGE: ghcr.io/${{ github.repository }}
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    defaults: { run: { working-directory: app } }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12", cache: pip, cache-dependency-path: app/requirements-dev.txt }
+      - run: pip install -r requirements-dev.txt
+      - run: python -m pytest -q
+
+  build-and-deploy:
+    needs: test
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Etiqueta de imagen = SHA corto del commit
+        run: echo "TAG=$(git rev-parse --short HEAD)" >> "$GITHUB_ENV"
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: app
+          push: true
+          build-args: APP_VERSION=${{ env.TAG }}
+          tags: |
+            ${{ env.IMAGE }}:${{ env.TAG }}
+            ${{ env.IMAGE }}:latest
+      - name: Escaneo de vulnerabilidades (Trivy)
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: ${{ env.IMAGE }}:${{ env.TAG }}
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: "0"     # informa sin bloquear; ponlo a "1" para que falle el pipeline
+      - name: Actualizar la etiqueta en k8s/ (GitOps)
+        run: |
+          sed -i "s/newTag: .*/newTag: ${TAG}   # GitHub Actions cambia esta línea en cada push a main/" k8s/kustomization.yaml
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add k8s/kustomization.yaml
+          git commit -m "deploy: gitops-demo ${TAG}"
+          git push

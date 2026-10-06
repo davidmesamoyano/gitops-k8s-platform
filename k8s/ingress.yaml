@@ -1,0 +1,14 @@
+# Traefik viene con k3s. Sustituye 192.168.1.146 por la IP de tu máquina virtual.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: gitops-demo
+spec:
+  rules:
+    - host: demo.192.168.1.146.nip.io
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service: { name: gitops-demo, port: { number: 80 } }

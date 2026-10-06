@@ -1,0 +1,21 @@
+# Argo CD vigila la carpeta k8s/ del repositorio y la aplica al clúster.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: gitops-demo
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/davidmesamoyano/gitops-k8s-platform.git
+    targetRevision: main
+    path: k8s
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: demo
+  syncPolicy:
+    automated:
+      prune: true      # borra del clúster lo que borres de Git
+      selfHeal: true   # deshace los cambios manuales hechos a mano con kubectl
+    syncOptions:
+      - CreateNamespace=true
