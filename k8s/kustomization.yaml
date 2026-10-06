@@ -14,4 +14,4 @@ labels:
       app.kubernetes.io/part-of: gitops-k8s-platform
 images:
   - name: ghcr.io/davidmesamoyano/gitops-k8s-platform
-    newTag: 46830ac   # GitHub Actions cambia esta línea en cada push a main
+    newTag: f189cf1   # GitHub Actions cambia esta línea en cada push a main
