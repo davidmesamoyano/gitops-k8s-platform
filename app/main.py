@@ -27,7 +27,7 @@ Instrumentator().instrument(app).expose(app, endpoint="/metrics", include_in_sch
 
 @app.get("/")
 def root() -> dict:
-    return {"app": "gitops-demo", "version": APP_VERSION, "pod": socket.gethostname()}
+    return {"app": "gitops-demo", "version": APP_VERSION, "pod": socket.gethostname(), "mensaje": "Desplegado con GitOps por David"}
 
 
 @app.get("/healthz")
